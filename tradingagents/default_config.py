@@ -2,7 +2,59 @@ import os
 
 _TRADINGAGENTS_HOME = os.path.join(os.path.expanduser("~"), ".tradingagents")
 
-DEFAULT_CONFIG = {
+
+# Single source of truth for env-var → config-key overrides. To expose
+# a new config key for environment-based override, add a row here — no
+# entry-point script changes required. Coercion is driven by the type
+# of the existing default, so users can keep writing plain strings in
+# their .env file.
+_ENV_OVERRIDES = {
+    "TRADINGAGENTS_LLM_PROVIDER":          "llm_provider",
+    "TRADINGAGENTS_DEEP_THINK_LLM":        "deep_think_llm",
+    "TRADINGAGENTS_QUICK_THINK_LLM":       "quick_think_llm",
+    "TRADINGAGENTS_LLM_BACKEND_URL":       "backend_url",
+    "TRADINGAGENTS_OUTPUT_LANGUAGE":       "output_language",
+    "TRADINGAGENTS_MAX_DEBATE_ROUNDS":     "max_debate_rounds",
+    "TRADINGAGENTS_MAX_RISK_ROUNDS":       "max_risk_discuss_rounds",
+    "TRADINGAGENTS_CHECKPOINT_ENABLED":    "checkpoint_enabled",
+    "TRADINGAGENTS_GOOGLE_THINKING_LEVEL": "google_thinking_level",
+    "TRADINGAGENTS_OPENAI_REASONING":     "openai_reasoning_effort",
+    "TRADINGAGENTS_ANTHROPIC_EFFORT":      "anthropic_effort",
+    "TRADINGAGENTS_MEMORY_LOG_MAX_ENTRIES": "memory_log_max_entries",
+    "TRADINGAGENTS_BENCHMARK_TICKER":       "benchmark_ticker",
+    "TRADINGAGENTS_ANALYST_CONCURRENCY":    "analyst_concurrency_limit",
+    "TRADINGAGENTS_NEWS_ARTICLE_LIMIT":     "news_article_limit",
+    "TRADINGAGENTS_GLOBAL_NEWS_LIMIT":      "global_news_article_limit",
+    "TRADINGAGENTS_GLOBAL_NEWS_LOOKBACK":   "global_news_lookback_days",
+}
+
+
+def _coerce(value: str, reference):
+    """Coerce env-var string to the type of the existing default value."""
+    if isinstance(reference, bool):
+        return value.strip().lower() in ("true", "1", "yes", "on")
+    if isinstance(reference, int) and not isinstance(reference, bool):
+        return int(value)
+    if isinstance(reference, float):
+        return float(value)
+    return value
+
+
+def _apply_env_overrides(config: dict) -> dict:
+    """Apply TRADINGAGENTS_* env vars to the config dict in-place."""
+    for env_var, key in _ENV_OVERRIDES.items():
+        raw = os.environ.get(env_var)
+        if raw is None or raw == "":
+            continue
+        existing = config.get(key)
+        # Memory-log max entries defaults to None; coerce to int when set.
+        if existing is None and key == "memory_log_max_entries":
+            existing = 0
+        config[key] = _coerce(raw, existing)
+    return config
+
+
+DEFAULT_CONFIG = _apply_env_overrides({
     "project_dir": os.path.abspath(os.path.join(os.path.dirname(__file__), ".")),
     "results_dir": os.getenv("TRADINGAGENTS_RESULTS_DIR", os.path.join(_TRADINGAGENTS_HOME, "logs")),
     "data_cache_dir": os.getenv("TRADINGAGENTS_CACHE_DIR", os.path.join(_TRADINGAGENTS_HOME, "cache")),
@@ -48,4 +100,47 @@ DEFAULT_CONFIG = {
     "tool_vendors": {
         # Example: "get_stock_data": "alpha_vantage",  # Override category default
     },
-}
+    # Benchmark for alpha calculation in the reflection layer.
+    # ``benchmark_ticker`` overrides ``benchmark_map`` for all tickers when set;
+    # leave it None to auto-pick from ``benchmark_map`` by exchange / board.
+    # The A-share fork's default benchmark is CSI 300 (沪深 300), but the map
+    # keeps board-specific alternatives so a STAR-board strategy can be
+    # benchmarked against 科创 50 instead, and Hong Kong tickers (via Stock
+    # Connect) fall back to HSI without manual config.
+    "benchmark_ticker": None,
+    "benchmark_map": {
+        # Code-prefix → benchmark index (A-stock vendor format, 6-digit)
+        "688": "000688",   # 科创板 → 科创 50
+        "300": "399006",   # 创业板 → 创业板指
+        "301": "399006",
+        "8":   "899050",   # 北交所 → 北证 50
+        "4":   "899050",
+        # Default for sh main board (6xx) / sz main board (000/001/002/003)
+        "*":   "000300",   # 沪深 300
+        # Suffix support for cross-market tickers (legacy yfinance interop)
+        ".HK": "^HSI",     # Hong Kong (Stock Connect) → 恒生指数
+        ".SS": "000300",   # 上交所 → 沪深 300
+        ".SZ": "000300",   # 深交所 → 沪深 300
+    },
+    # News fetching limits — used by a_stock get_news / get_global_news. Bump
+    # for longer-lookback strategies or to broaden macro coverage; cut to
+    # save tokens in agent prompts.
+    "news_article_limit": 20,             # max articles per ticker
+    "global_news_article_limit": 10,      # max articles for macro / global wire
+    "global_news_lookback_days": 7,       # macro news lookback window
+    # Search queries used by get_global_news for macro headlines. Tuned to
+    # A-share macro drivers (policy / FX / Sino-US trade / commodities).
+    "global_news_queries": [
+        "央行降准降息MLF LPR 货币政策",
+        "证监会 IPO 再融资 减持新规",
+        "国务院 产业政策 新质生产力",
+        "中美贸易 出口管制 关税",
+        "外管局 人民币汇率 跨境资本",
+        "国资委 央企改革 并购重组",
+    ],
+    # Analyst concurrency: when >1, independent analysts (market / social /
+    # news / fundamentals / policy / hot_money / lockup) run in parallel
+    # through LangGraph's `Send` mechanism instead of sequential chaining.
+    # Default 1 preserves the legacy single-threaded behaviour.
+    "analyst_concurrency_limit": 1,
+})
