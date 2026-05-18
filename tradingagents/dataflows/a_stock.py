@@ -272,6 +272,16 @@ def _sina_kline_fallback(code: str, start_date: str = None, end_date: str = None
     Returns DataFrame with columns: Date, Open, High, Low, Close, Volume.
     """
     prefix = "sh" if code.startswith("6") else "sz"
+    return _sina_kline(prefix, code, start_date, end_date)
+
+
+def _sina_kline(prefix: str, code: str, start_date: str = None, end_date: str = None) -> pd.DataFrame:
+    """Generic Sina K-line fetcher, parameterised on market prefix.
+
+    Used for both stocks (prefix derived from code) and indices (prefix from
+    _INDEX_PREFIX_MAP). Sina's endpoint accepts ``sh000300`` / ``sz399006`` /
+    ``bj899050`` symbols transparently.
+    """
     url = (
         "http://money.finance.sina.com.cn/quotes_service/api/json_v2.php/"
         "CN_MarketData.getKLineData"
@@ -309,6 +319,60 @@ def _sina_kline_fallback(code: str, start_date: str = None, end_date: str = None
         df = df[df["Date"] <= pd.to_datetime(end_date)]
 
     return df
+
+
+# ---------------------------------------------------------------------------
+# Index history (CSI 300, 创业板指, 科创 50, 中证 1000 ...) — used by
+# the reflection layer for alpha-vs-benchmark resolution. Goes through
+# Sina's K-line endpoint so the project keeps its "zero overseas API"
+# guarantee (yfinance was the previous source for 000300.SS).
+# ---------------------------------------------------------------------------
+
+_INDEX_PREFIX_MAP = {
+    "000001": "sh",  # 上证综指
+    "000016": "sh",  # 上证 50
+    "000300": "sh",  # 沪深 300
+    "000688": "sh",  # 科创 50
+    "000852": "sh",  # 中证 1000
+    "000905": "sh",  # 中证 500
+    "000906": "sh",  # 中证 800
+    "399001": "sz",  # 深证成指
+    "399005": "sz",  # 中小板指
+    "399006": "sz",  # 创业板指
+    "399300": "sz",  # 深市沪深 300 镜像
+    "899050": "bj",  # 北证 50
+}
+
+
+def _index_prefix(index_code: str) -> str:
+    """Pick Sina market prefix for an index code."""
+    explicit = _INDEX_PREFIX_MAP.get(index_code)
+    if explicit:
+        return explicit
+    if index_code.startswith("399"):
+        return "sz"
+    if index_code.startswith("899") or index_code.startswith("8"):
+        return "bj"
+    return "sh"
+
+
+def get_index_history(
+    index_code: Annotated[str, "Index 6-digit code (e.g. 000300 for 沪深300)"],
+    start_date: Annotated[str, "Start date in yyyy-mm-dd format"],
+    end_date: Annotated[str, "End date in yyyy-mm-dd format"],
+) -> pd.DataFrame:
+    """Daily K-line for an A-share index, via Sina HTTP.
+
+    Returns DataFrame with columns: Date, Open, High, Low, Close, Volume.
+    Empty DataFrame on failure (caller decides how to fall back).
+    """
+    code = safe_ticker_component(index_code.strip())
+    prefix = _index_prefix(code)
+    try:
+        return _sina_kline(prefix, code, start_date, end_date)
+    except Exception as e:
+        logger.warning("Sina index K-line failed for %s%s: %s", prefix, code, e)
+        return pd.DataFrame()
 
 
 # ---------------------------------------------------------------------------
@@ -965,9 +1029,18 @@ def get_news(
     ticker: Annotated[str, "A-stock code"],
     start_date: Annotated[str, "Start date yyyy-mm-dd"],
     end_date: Annotated[str, "End date yyyy-mm-dd"],
+    limit: Annotated[int, "Max articles to keep; 0 → use config default"] = 0,
 ) -> str:
-    """Get stock-specific news via East Money direct API (Sina as fallback)."""
+    """Get stock-specific news via East Money direct API (Sina as fallback).
+
+    When ``limit`` is 0 (the default), reads ``news_article_limit`` from the
+    dataflows config (overridable via ``TRADINGAGENTS_NEWS_ARTICLE_LIMIT``).
+    """
+    from .config import get_config
+
     code = _normalize_ticker(ticker)
+    if limit is None or limit <= 0:
+        limit = int(get_config().get("news_article_limit", 20) or 20)
 
     start_dt = datetime.strptime(start_date, "%Y-%m-%d")
     end_dt = datetime.strptime(end_date, "%Y-%m-%d")
@@ -994,6 +1067,8 @@ def get_news(
     news_str = ""
     count = 0
     for art in articles:
+        if count >= limit:
+            break
         pub_time = art.get("time", "")
         try:
             pub_dt = datetime.strptime(pub_time[:10], "%Y-%m-%d")
@@ -1033,10 +1108,24 @@ def get_news(
 
 def get_global_news(
     curr_date: Annotated[str, "Current date yyyy-mm-dd"],
-    look_back_days: Annotated[int, "Days to look back"] = 7,
-    limit: Annotated[int, "Max articles"] = 10,
+    look_back_days: Annotated[int, "Days to look back; 0 → config default"] = 0,
+    limit: Annotated[int, "Max articles; 0 → config default"] = 0,
 ) -> str:
-    """Get China/global financial news via direct HTTP (CLS + Eastmoney)."""
+    """Get China/global financial news via direct HTTP (CLS + Eastmoney).
+
+    When ``look_back_days`` / ``limit`` are 0 (the default), they fall back
+    to ``global_news_lookback_days`` and ``global_news_article_limit`` from
+    the dataflows config (overridable via TRADINGAGENTS_GLOBAL_NEWS_LOOKBACK
+    and TRADINGAGENTS_GLOBAL_NEWS_LIMIT).
+    """
+    from .config import get_config
+
+    cfg = get_config()
+    if look_back_days is None or look_back_days <= 0:
+        look_back_days = int(cfg.get("global_news_lookback_days", 7) or 7)
+    if limit is None or limit <= 0:
+        limit = int(cfg.get("global_news_article_limit", 10) or 10)
+
     start_dt = datetime.strptime(curr_date, "%Y-%m-%d") - relativedelta(
         days=look_back_days
     )
@@ -1122,6 +1211,153 @@ def get_global_news(
 
     return (
         f"## China & Global Market News, from {start_date} to {curr_date}:\n\n"
+        + news_str
+    )
+
+
+# ---- 8.5 get_policy_news (first-hand A-share policy stream) ----
+
+
+# Government-body whitelist used to filter generic news streams down to
+# policy-relevant items. Anything containing one of these tokens in title
+# or body is treated as policy news. Tokens are matched case-sensitively
+# against Chinese text (no normalisation needed).
+_POLICY_INSTITUTIONS = (
+    # 中央
+    "国务院", "国常会", "中央政治局", "中央经济工作会议", "中央财经", "国办", "中办",
+    # 金融监管
+    "证监会", "央行", "中国人民银行", "国家金融监督管理总局", "银保监会", "外管局",
+    "国家外汇管理局", "网信办",
+    # 经济 / 产业
+    "发改委", "国家发改委", "工信部", "工业和信息化部", "财政部", "商务部",
+    "国资委", "国务院国资委", "统计局", "国家统计局", "海关总署", "市场监管总局",
+    # 法律 / 司法
+    "最高人民法院", "最高人民检察院",
+    # 行业政策常见词
+    "新质生产力", "中央一号文件", "十四五", "十五五", "国务院常务会议",
+)
+
+
+def _is_policy_news(title: str, body: str) -> bool:
+    text = f"{title or ''} {body or ''}"
+    return any(token in text for token in _POLICY_INSTITUTIONS)
+
+
+def get_policy_news(
+    curr_date: Annotated[str, "Current date yyyy-mm-dd"],
+    look_back_days: Annotated[int, "Days to look back; 0 → config default"] = 0,
+    limit: Annotated[int, "Max articles; 0 → config default"] = 0,
+) -> str:
+    """Policy-only news stream filtered from CLS + Eastmoney by government-body keywords.
+
+    Produces a first-hand A-share policy feed for the policy analyst. Sources:
+      1. 财联社 cls.cn (telegraph wire) — fastest policy headlines
+      2. 东方财富 np-weblist (7x24 stream) — broader macro coverage
+
+    Items are filtered by ``_POLICY_INSTITUTIONS`` (国务院 / 证监会 / 央行 /
+    发改委 / 工信部 / 国资委 / 商务部 / 财政部 / 外管局 / 网信办 / 国家金融
+    监管总局 ...). When neither source returns matches, callers should fall
+    back to ``get_global_news`` for broader macro context.
+    """
+    from .config import get_config
+
+    cfg = get_config()
+    if look_back_days is None or look_back_days <= 0:
+        look_back_days = int(cfg.get("global_news_lookback_days", 7) or 7)
+    if limit is None or limit <= 0:
+        limit = int(cfg.get("global_news_article_limit", 10) or 10)
+
+    start_dt = datetime.strptime(curr_date, "%Y-%m-%d") - relativedelta(days=look_back_days)
+    start_date = start_dt.strftime("%Y-%m-%d")
+
+    all_news: list[dict] = []
+
+    # Source 1: CLS wire — pull a generous slice (3x limit) so the policy
+    # filter has enough raw material to work with.
+    raw_quota = max(limit * 3, 30)
+    try:
+        cls_url = "https://www.cls.cn/nodeapi/telegraphList"
+        cls_params = {"rn": str(raw_quota), "page": "1"}
+        cls_headers = {"User-Agent": _UA, "Referer": "https://www.cls.cn/"}
+        r_cls = _requests.get(cls_url, params=cls_params, headers=cls_headers, timeout=10)
+        d_cls = r_cls.json()
+        for item in d_cls.get("data", {}).get("roll_data", []):
+            title = item.get("title", "") or item.get("brief", "")
+            content = item.get("content", "") or item.get("brief", "")
+            ctime = item.get("ctime", "")
+            pub_time = ""
+            if ctime:
+                try:
+                    pub_time = datetime.fromtimestamp(int(ctime)).strftime("%Y-%m-%d %H:%M")
+                except (ValueError, TypeError, OSError):
+                    pub_time = str(ctime)
+            if _is_policy_news(title, content):
+                all_news.append({
+                    "title": title,
+                    "content": content,
+                    "time": pub_time,
+                    "source": "CLS Wire (policy)",
+                })
+    except Exception as e:
+        logger.warning("CLS policy fetch failed: %s", e)
+
+    # Source 2: Eastmoney 7x24
+    try:
+        em_url = "https://np-weblist.eastmoney.com/comm/web/getFastNewsList"
+        em_params = {
+            "client": "web",
+            "biz": "web_724",
+            "fastColumn": "102",
+            "sortEnd": "",
+            "pageSize": str(raw_quota),
+        }
+        em_headers = {"User-Agent": _UA, "Referer": "https://kuaixun.eastmoney.com/"}
+        r_em = _requests.get(em_url, params=em_params, headers=em_headers, timeout=10)
+        d_em = r_em.json()
+        for item in d_em.get("data", {}).get("fastNewsList", []):
+            title = item.get("title", "")
+            summary = item.get("summary", "")[:400]
+            pub_time = item.get("showTime", "")
+            if _is_policy_news(title, summary):
+                all_news.append({
+                    "title": title,
+                    "content": summary,
+                    "time": pub_time,
+                    "source": "Eastmoney 7x24 (policy)",
+                })
+    except Exception as e:
+        logger.warning("Eastmoney policy fetch failed: %s", e)
+
+    if not all_news:
+        return (
+            f"No policy news found for {curr_date} (lookback {look_back_days}d). "
+            f"Filter keywords: {', '.join(_POLICY_INSTITUTIONS[:8])} 等 "
+            f"{len(_POLICY_INSTITUTIONS)} 个政府机构。"
+        )
+
+    # Deduplicate by title
+    seen: set[str] = set()
+    unique: list[dict] = []
+    for n in all_news:
+        if n["title"] not in seen:
+            seen.add(n["title"])
+            unique.append(n)
+
+    news_str = ""
+    for n in unique[:limit]:
+        news_str += f"### {n['title']} (source: {n['source']}, time: {n.get('time', '')})\n"
+        if n.get("content"):
+            snippet = (
+                n["content"][:400] + "..."
+                if len(n["content"]) > 400
+                else n["content"]
+            )
+            news_str += f"{snippet}\n"
+        news_str += "\n"
+
+    return (
+        f"## A-share policy stream, {start_date} to {curr_date} "
+        f"(filtered for government-body mentions):\n\n"
         + news_str
     )
 

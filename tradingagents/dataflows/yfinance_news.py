@@ -52,6 +52,8 @@ def get_news_yfinance(
     ticker: str,
     start_date: str,
     end_date: str,
+    limit: int = 0,
+    **_unused,
 ) -> str:
     """
     Retrieve news for a specific stock ticker using yfinance.
@@ -108,6 +110,7 @@ def get_global_news_yfinance(
     curr_date: str,
     look_back_days: int = 7,
     limit: int = 10,
+    **_unused,
 ) -> str:
     """
     Retrieve global/macro economic news using yfinance Search.
