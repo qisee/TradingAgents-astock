@@ -29,6 +29,8 @@ A-Share Neutral Framework — use these China-specific balancing considerations:
 - Lockup Expiry Timing: The neutral view is not to panic at lockup dates but to monitor actual reduction filings (减持公告). The risk is real but the timing is uncertain — reducing exposure gradually near lockup windows is more sensible than binary all-in/all-out.
 - Sector Rotation Awareness: A-share themes rotate fast (typically 2-4 weeks). The neutral question is: where are we in the rotation cycle? Early rotation = room to run; late rotation = reduced upside with elevated downside.
 - Position Sizing over Direction: In a market with ±10-20% daily limits and T+1 settlement, position sizing is more important than directional conviction. A moderate position captures upside while limiting locked-in loss scenarios.
+- Market Temperature (市场情绪温度): Read the broader regime before committing — 涨停家数 vs 跌停家数 ratio, 沪深300 / 创业板指 spread, north-bound 5-day cumulative flow. A single-name conviction matters less than whether the index is in risk-on or risk-off mode; even a strong thesis under-performs if the tape is exiting.
+- Pledged-Share Awareness: Treat heavy controlling-shareholder pledge as a tail risk to size around — not as a binary disqualifier (aggressive view) nor a guaranteed crash (conservative view). Position should be cut to the size at which a forced-liquidation cascade still leaves the portfolio intact.
 
 Here is the trader's decision:
 

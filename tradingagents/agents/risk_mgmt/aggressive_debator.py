@@ -28,6 +28,8 @@ A-Share Aggressive Framework — leverage these China-specific upside arguments:
 - Northbound Validation: If foreign institutions via Stock Connect are net buying alongside domestic momentum, this dual confirmation is a strong signal
 - PE Expansion Phase: In A-share bull cycles, PEs routinely expand to 50-100x for thematic leaders; applying US-market valuation discipline too early means missing the main move
 - Retail Sentiment Tailwind: A-shares are 80% retail; when sentiment turns positive, the herd effect amplifies gains far beyond what fundamentals alone would suggest
+- 一字板 / 连板效应: A first-day 一字板 (limit-up at open with massive bid-ask imbalance, untradeable through the session) signals extreme conviction; in strong themes these can chain 5-10 days, with each subsequent limit-up multiplying the move — refusing to chase on the basis of "missed first day" is its own form of opportunity cost
+- 主题题材 / 龙头股集中度: A-share theme rallies concentrate violently on the perceived 龙头 (theme leader); buying the leader on day 2 of a multi-day theme often outperforms diversified exposure to the whole sector
 
 Here is the trader's decision:
 

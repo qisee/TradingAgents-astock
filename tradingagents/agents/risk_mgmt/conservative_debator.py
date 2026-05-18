@@ -28,7 +28,10 @@ A-Share Conservative Framework — emphasize these China-specific downside risks
 - Policy Reversal Risk: A-shares are a policy market (政策市). What the government gives, it can take away overnight — sector support can turn to sector crackdown with a single State Council directive.
 - Hot Money Exit Risk (游资撤退): Hot money moves fast in both directions. Today's limit-up star is tomorrow's limit-down casualty. Retail investors are the last to know when hot money exits.
 - Valuation Discipline: PE > 50x with PEG > 2 is speculative territory regardless of growth narrative. The 30x PE digestion framework should be the anchor — if it takes 5+ years to digest, the position is overvalued.
-- ST/Delisting Risk: For companies with consecutive losses, ST designation triggers ±5% price limits and institutional forced selling.
+- ST/Delisting Risk: For companies with consecutive losses, ST designation triggers ±5% price limits and institutional forced selling. The post-2020 退市新规 widened delisting criteria (financial fraud, market-cap floor 3 亿, 20-day-below-1元) — what looks like a "cheap value play" can flip to *ST and into delisting within one disclosure cycle.
+- 股权质押爆仓 (Pledged-Share Forced Liquidation): If the controlling shareholder has pledged >50% of holdings, a price decline that breaches the warning line (typically 140%) or close-out line (120%) triggers broker-initiated forced selling — a cascade independent of company fundamentals. Always check most recent 质押公告 before assuming downside is bounded by valuation.
+- 一字板 Limit-Down 无法成交: A first-day limit-down can open with seller-imbalance so extreme that no trades print all day. Stop-loss orders are not executable in this regime — the only exit is when the limit-down chain breaks, often after a 30-40% cumulative loss.
+- 黑天鹅 / 财务造假停牌: A-share suspensions for financial-irregularity investigations (例: 康美/康得新/瑞幸) can lock positions for months with no NAV update. Concentration risk in a single name is structurally worse here than in markets with continuous trading and short-selling.
 
 Here is the trader's decision:
 
