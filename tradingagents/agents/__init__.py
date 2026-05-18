@@ -7,7 +7,10 @@ from .analysts.lockup_watcher import create_lockup_watcher
 from .analysts.market_analyst import create_market_analyst
 from .analysts.news_analyst import create_news_analyst
 from .analysts.policy_analyst import create_policy_analyst
-from .analysts.social_media_analyst import create_social_media_analyst
+from .analysts.social_media_analyst import (
+    create_sentiment_analyst,
+    create_social_media_analyst,
+)
 
 from .quality_gate import create_quality_gate
 
@@ -42,6 +45,7 @@ __all__ = [
     "create_quality_gate",
     "create_portfolio_manager",
     "create_conservative_debator",
+    "create_sentiment_analyst",
     "create_social_media_analyst",
     "create_trader",
 ]

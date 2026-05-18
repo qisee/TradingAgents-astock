@@ -4,6 +4,7 @@ from tradingagents.agents.utils.agent_utils import (
     get_global_news,
     get_language_instruction,
     get_news,
+    get_policy_news,
 )
 from tradingagents.dataflows.config import get_config
 
@@ -18,6 +19,7 @@ def create_policy_analyst(llm):
         tools = [
             get_news,
             get_global_news,
+            get_policy_news,
         ]
 
         system_message = (
@@ -34,8 +36,9 @@ def create_policy_analyst(llm):
             "\n2. 评估政策的力度级别：指导意见（弱）< 部委通知（中）< 国务院文件（强）< 法律法规（最强）"
             "\n3. 判断政策的影响时间窗口：短期脉冲（1-2 周）vs 中期趋势（1-3 月）vs 长期结构性（半年以上）"
             "\n4. 分析政策的受益/受损逻辑链：政策 → 行业影响 → 公司业务映射 → 财务影响估算"
-            "\n\n请使用以下工具："
-            "\n- `get_news(query, start_date, end_date)`：搜索与公司/行业相关的政策新闻"
+            "\n\n请使用以下工具（**首选 `get_policy_news`**，它是一手政策流，已经按政府机构关键词过滤；另两个作为补充）："
+            "\n- `get_policy_news(curr_date, look_back_days, limit)`：A 股一手政策流（CLS + 东财，按国务院/证监会/央行/发改委等政府机构关键词过滤）"
+            "\n- `get_news(ticker, start_date, end_date)`：搜索与公司/行业相关的政策新闻"
             "\n- `get_global_news(curr_date, look_back_days, limit)`：获取宏观经济和政策面新闻"
             "\n\n撰写详细的政策分析报告，明确给出政策面对该公司的总体评级（重大利好/利好/中性/利空/重大利空），并量化影响程度。报告末尾附 Markdown 表格列出关键政策事件、影响方向和持续时间。"
             "\n\n📋 必采清单 — 以下数据点必须出现在报告中，无法获取时标注 [数据缺失: xxx]："

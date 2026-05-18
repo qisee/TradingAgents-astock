@@ -7,6 +7,7 @@ import json
 from datetime import datetime, timedelta
 from typing import Dict, Any, Tuple, List, Optional
 
+import pandas as pd
 import yfinance as yf
 
 logger = logging.getLogger(__name__)
@@ -37,6 +38,7 @@ from tradingagents.agents.utils.agent_utils import (
     get_news,
     get_insider_transactions,
     get_global_news,
+    get_policy_news,
     get_profit_forecast,
     get_hot_stocks,
     get_northbound_flow,
@@ -122,6 +124,7 @@ class TradingAgentsGraph:
             self.deep_thinking_llm,
             self.tool_nodes,
             self.conditional_logic,
+            analyst_concurrency_limit=int(self.config.get("analyst_concurrency_limit", 1) or 1),
         )
 
         self.propagator = Propagator()
@@ -199,6 +202,7 @@ class TradingAgentsGraph:
                 [
                     get_news,
                     get_global_news,
+                    get_policy_news,
                 ]
             ),
             "hot_money": ToolNode(
@@ -224,22 +228,168 @@ class TradingAgentsGraph:
             ),
         }
 
+    _BENCHMARK_LABELS = {
+        "000001": "上证综指",
+        "000016": "上证 50",
+        "000300": "沪深 300 (CSI 300)",
+        "000688": "科创 50",
+        "000852": "中证 1000",
+        "000905": "中证 500",
+        "000906": "中证 800",
+        "399001": "深证成指",
+        "399005": "中小板指",
+        "399006": "创业板指",
+        "899050": "北证 50",
+        "^HSI": "恒生指数 (HSI)",
+        "^N225": "Nikkei 225",
+        "^FTSE": "FTSE 100",
+        "SPY": "S&P 500 (SPY)",
+    }
+
+    def _benchmark_label(self, benchmark_code: str) -> str:
+        """Human-readable label for a benchmark code (used in reflection text)."""
+        return self._BENCHMARK_LABELS.get(benchmark_code, benchmark_code)
+
+    def _resolve_benchmark(self, ticker: str) -> str:
+        """Pick the benchmark index for ``ticker``.
+
+        Resolution order:
+          1. ``config['benchmark_ticker']`` — explicit override wins
+          2. ``config['benchmark_map']`` — prefix / suffix lookup against the
+             raw ticker (e.g. ``688`` → 科创 50, ``.HK`` → ``^HSI``)
+          3. Wildcard ``"*"`` entry — default basket-wide benchmark (CSI 300)
+        """
+        override = self.config.get("benchmark_ticker")
+        if override:
+            return str(override)
+
+        bench_map = self.config.get("benchmark_map") or {}
+        raw = ticker.strip()
+
+        # Suffix match first (e.g. ".HK") — preserves cross-market support.
+        for key, value in bench_map.items():
+            if key.startswith(".") and raw.upper().endswith(key.upper()):
+                return str(value)
+
+        # Strip optional .SH / .SZ / .BJ before prefix matching.
+        normalised = raw
+        for suffix in (".SH", ".SZ", ".BJ", ".SS"):
+            if normalised.upper().endswith(suffix):
+                normalised = normalised[: -len(suffix)]
+                break
+
+        # Longest-prefix wins so "688" beats "6" if both registered.
+        prefix_keys = sorted(
+            (k for k in bench_map if not k.startswith(".") and k != "*"),
+            key=len,
+            reverse=True,
+        )
+        for prefix in prefix_keys:
+            if normalised.startswith(prefix):
+                return str(bench_map[prefix])
+
+        if "*" in bench_map:
+            return str(bench_map["*"])
+        return "000300"  # ultimate fallback
+
     def _fetch_returns(
         self, ticker: str, trade_date: str, holding_days: int = 5
     ) -> Tuple[Optional[float], Optional[float], Optional[int]]:
         """Fetch raw and alpha return for ticker over holding_days from trade_date.
 
-        Returns (raw_return, alpha_return, actual_holding_days) or
-        (None, None, None) if price data is unavailable (too recent, delisted,
-        or network error).
-        """
-        try:
-            start = datetime.strptime(trade_date, "%Y-%m-%d")
-            end = start + timedelta(days=holding_days + 7)  # buffer for weekends/holidays
-            end_str = end.strftime("%Y-%m-%d")
+        Primary path: a_stock vendor (Sina HTTP for both ticker K-line and
+        the segment-appropriate benchmark via ``benchmark_map``). Stays
+        consistent with the project's "zero overseas API" guarantee and
+        works for tickers that yfinance does not cover (new STAR / ChiNext
+        listings, 北交所).
 
-            stock = yf.Ticker(ticker).history(start=trade_date, end=end_str)
-            benchmark = yf.Ticker("000300.SS").history(start=trade_date, end=end_str)
+        Fallback: yfinance with the .SS / .SZ suffix mapping — only triggers
+        when the a_stock path returns nothing (e.g. mootdx + Sina both down)
+        AND the resolved benchmark looks like a yfinance symbol (starts with
+        ``^`` or contains a dot).
+
+        Returns (raw_return, alpha_return, actual_holding_days) or
+        (None, None, None) if price data is unavailable.
+        """
+        start = datetime.strptime(trade_date, "%Y-%m-%d")
+        end = start + timedelta(days=holding_days + 7)  # buffer for weekends/holidays
+        end_str = end.strftime("%Y-%m-%d")
+        benchmark_code = self._resolve_benchmark(ticker)
+
+        # If benchmark looks like a yfinance symbol (^HSI, ^N225), skip
+        # the a_stock path entirely — that path only knows A-share indices.
+        is_overseas_bench = benchmark_code.startswith("^") or "." in benchmark_code
+        if not is_overseas_bench:
+            result = self._fetch_returns_astock(
+                ticker, trade_date, end_str, holding_days, benchmark_code
+            )
+            if result is not None:
+                return result
+
+        return self._fetch_returns_yfinance(
+            ticker, trade_date, end_str, holding_days, benchmark_code
+        )
+
+    def _fetch_returns_astock(
+        self, ticker: str, start_str: str, end_str: str,
+        holding_days: int, benchmark_code: str,
+    ) -> Optional[Tuple[float, float, int]]:
+        """A-stock vendor path: mootdx/Sina K-line for ticker + Sina for benchmark."""
+        from tradingagents.dataflows.a_stock import (
+            _load_ohlcv_astock,
+            _normalize_ticker,
+            get_index_history,
+        )
+
+        try:
+            code = _normalize_ticker(ticker)
+
+            stock = _load_ohlcv_astock(code, end_str)
+            if stock is None or stock.empty:
+                return None
+            stock = stock[stock["Date"] >= pd.to_datetime(start_str)].reset_index(drop=True)
+
+            benchmark = get_index_history(benchmark_code, start_str, end_str)
+            if benchmark is None or benchmark.empty:
+                return None
+            benchmark = benchmark.reset_index(drop=True)
+
+            if len(stock) < 2 or len(benchmark) < 2:
+                return None
+
+            actual_days = min(holding_days, len(stock) - 1, len(benchmark) - 1)
+            raw = float(
+                (stock["Close"].iloc[actual_days] - stock["Close"].iloc[0])
+                / stock["Close"].iloc[0]
+            )
+            bench_ret = float(
+                (benchmark["Close"].iloc[actual_days] - benchmark["Close"].iloc[0])
+                / benchmark["Close"].iloc[0]
+            )
+            alpha = raw - bench_ret
+            return raw, alpha, actual_days
+        except Exception as e:
+            logger.warning(
+                "a_stock alpha resolution failed for %s on %s: %s",
+                ticker, start_str, e,
+            )
+            return None
+
+    def _fetch_returns_yfinance(
+        self, ticker: str, start_str: str, end_str: str,
+        holding_days: int, benchmark_code: str,
+    ) -> Tuple[Optional[float], Optional[float], Optional[int]]:
+        """Last-resort yfinance fallback. Requires overseas network."""
+        # Map A-share benchmark codes back to yfinance symbols when reaching
+        # this path (000300 → 000300.SS, 399006 → 399006.SZ, 000688 → 000688.SS).
+        yf_benchmark = benchmark_code
+        if benchmark_code.isdigit() and len(benchmark_code) == 6:
+            yf_benchmark = (
+                benchmark_code + (".SZ" if benchmark_code.startswith("3") else ".SS")
+            )
+        try:
+            stock = yf.Ticker(ticker).history(start=start_str, end=end_str)
+            benchmark = yf.Ticker(yf_benchmark).history(start=start_str, end=end_str)
 
             if len(stock) < 2 or len(benchmark) < 2:
                 return None, None, None
@@ -257,8 +407,8 @@ class TradingAgentsGraph:
             return raw, alpha, actual_days
         except Exception as e:
             logger.warning(
-                "Could not resolve outcome for %s on %s (will retry next run): %s",
-                ticker, trade_date, e,
+                "yfinance alpha resolution also failed for %s on %s (will retry next run): %s",
+                ticker, start_str, e,
             )
             return None, None, None
 
@@ -276,6 +426,8 @@ class TradingAgentsGraph:
         if not pending:
             return
 
+        benchmark_label = self._benchmark_label(self._resolve_benchmark(ticker))
+
         updates = []
         for entry in pending:
             raw, alpha, days = self._fetch_returns(ticker, entry["date"])
@@ -285,6 +437,7 @@ class TradingAgentsGraph:
                 final_decision=entry.get("decision", ""),
                 raw_return=raw,
                 alpha_return=alpha,
+                benchmark_label=benchmark_label,
             )
             updates.append({
                 "ticker": ticker,

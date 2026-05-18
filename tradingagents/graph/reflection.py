@@ -33,11 +33,17 @@ class Reflector:
         final_decision: str,
         raw_return: float,
         alpha_return: float,
+        benchmark_label: str = "沪深 300 (CSI 300)",
     ) -> str:
         """Single reflection call on the final trade decision with outcome context.
 
         Used by Phase B deferred reflection. The final_trade_decision already
         synthesises all analyst insights, so no separate market context is needed.
+
+        ``benchmark_label`` is the human-readable benchmark name that produced
+        ``alpha_return``; pass the segment-appropriate label so reflections
+        on a STAR-board strategy read "Alpha vs 科创 50" instead of the
+        misleading CSI-300 default.
         """
         messages = [
             ("system", self.log_reflection_prompt),
@@ -45,7 +51,7 @@ class Reflector:
                 "human",
                 (
                     f"Raw return: {raw_return:+.1%}\n"
-                    f"Alpha vs CSI 300 (沪深300): {alpha_return:+.1%}\n\n"
+                    f"Alpha vs {benchmark_label}: {alpha_return:+.1%}\n\n"
                     f"Final Decision:\n{final_decision}"
                 ),
             ),

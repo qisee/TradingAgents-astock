@@ -486,6 +486,7 @@ class TestDeferredReflection:
     # TradingAgentsGraph._fetch_returns
 
     def test_fetch_returns_valid_ticker(self):
+        """yfinance-fallback path: stock + benchmark both present → tuple of floats."""
         stock_prices = [100.0, 102.0, 104.0, 103.0, 105.0, 106.0]
         bench_prices = [4000.0, 4020.0, 4040.0, 4030.0, 4050.0, 4060.0]
         mock_graph = MagicMock(spec=TradingAgentsGraph)
@@ -495,7 +496,9 @@ class TestDeferredReflection:
                 m.history.return_value = _price_df(bench_prices if sym == "000300.SS" else stock_prices)
                 return m
             mock_ticker_cls.side_effect = _make_ticker
-            raw, alpha, days = TradingAgentsGraph._fetch_returns(mock_graph, "688017", "2026-01-05")
+            raw, alpha, days = TradingAgentsGraph._fetch_returns_yfinance(
+                mock_graph, "688017", "2026-01-05", "2026-01-17", 5, "000300"
+            )
         assert raw is not None and alpha is not None and days is not None
         assert isinstance(raw, float) and isinstance(alpha, float) and isinstance(days, int)
         assert days == 5
@@ -507,7 +510,9 @@ class TestDeferredReflection:
             m = MagicMock()
             m.history.return_value = _price_df([100.0])
             mock_ticker_cls.return_value = m
-            raw, alpha, days = TradingAgentsGraph._fetch_returns(mock_graph, "NVDA", "2026-04-19")
+            raw, alpha, days = TradingAgentsGraph._fetch_returns_yfinance(
+                mock_graph, "NVDA", "2026-04-19", "2026-05-01", 5, "000300"
+            )
         assert raw is None and alpha is None and days is None
 
     def test_fetch_returns_delisted(self):
@@ -517,11 +522,13 @@ class TestDeferredReflection:
             m = MagicMock()
             m.history.return_value = pd.DataFrame({"Close": []})
             mock_ticker_cls.return_value = m
-            raw, alpha, days = TradingAgentsGraph._fetch_returns(mock_graph, "XXXXXFAKE", "2026-01-10")
+            raw, alpha, days = TradingAgentsGraph._fetch_returns_yfinance(
+                mock_graph, "XXXXXFAKE", "2026-01-10", "2026-01-22", 5, "000300"
+            )
         assert raw is None and alpha is None and days is None
 
     def test_fetch_returns_benchmark_shorter_than_stock(self):
-        """CSI 300 having fewer rows than the stock must not raise IndexError."""
+        """Benchmark having fewer rows than the stock must not raise IndexError."""
         stock_prices = [100.0, 102.0, 104.0, 103.0, 105.0, 106.0]
         bench_prices = [4000.0, 4020.0, 4030.0]
         mock_graph = MagicMock(spec=TradingAgentsGraph)
@@ -531,9 +538,31 @@ class TestDeferredReflection:
                 m.history.return_value = _price_df(bench_prices if sym == "000300.SS" else stock_prices)
                 return m
             mock_ticker_cls.side_effect = _make_ticker
-            raw, alpha, days = TradingAgentsGraph._fetch_returns(mock_graph, "688017", "2026-01-05")
+            raw, alpha, days = TradingAgentsGraph._fetch_returns_yfinance(
+                mock_graph, "688017", "2026-01-05", "2026-01-17", 5, "000300"
+            )
         assert raw is not None and alpha is not None and days is not None
         assert days == 2
+
+    def test_resolve_benchmark_dispatch(self):
+        """`_resolve_benchmark` picks the segment-appropriate index."""
+        mock_graph = MagicMock(spec=TradingAgentsGraph)
+        mock_graph.config = {
+            "benchmark_map": {
+                "688": "000688",
+                "300": "399006",
+                "8": "899050",
+                "*": "000300",
+                ".HK": "^HSI",
+            },
+        }
+        resolve = TradingAgentsGraph._resolve_benchmark
+        assert resolve(mock_graph, "688017") == "000688"      # STAR → 科创 50
+        assert resolve(mock_graph, "300750") == "399006"      # ChiNext → 创业板指
+        assert resolve(mock_graph, "832000") == "899050"      # 北交所 → 北证 50
+        assert resolve(mock_graph, "600519") == "000300"      # 沪市主板 → 沪深 300
+        assert resolve(mock_graph, "000001") == "000300"      # 深市主板 → 沪深 300 (wildcard)
+        assert resolve(mock_graph, "0700.HK") == "^HSI"       # HK suffix → 恒生指数
 
     # TradingAgentsGraph._resolve_pending_entries
 
