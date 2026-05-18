@@ -18,10 +18,11 @@ so that:
 
 from __future__ import annotations
 
+import re
 from enum import Enum
 from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 # ---------------------------------------------------------------------------
@@ -51,6 +52,112 @@ class TraderAction(str, Enum):
     BUY = "Buy"
     HOLD = "Hold"
     SELL = "Sell"
+
+
+# ---------------------------------------------------------------------------
+# A-stock market constraints
+# ---------------------------------------------------------------------------
+
+
+class AStockMarketType(str, Enum):
+    """A-share market segment, drives daily price limit and minimum lot size."""
+
+    MAIN_SH = "Main-SH"       # 沪市主板 6xx / 9xx (B-share)
+    MAIN_SZ = "Main-SZ"       # 深市主板 000 / 001 / 002 (中小板归并)
+    STAR = "STAR"             # 科创板 688
+    CHINEXT = "ChiNext"       # 创业板 300 / 301
+    BEIJING = "Beijing"       # 北交所 8xx / 4xx
+    ST = "ST"                 # ST / *ST 风险警示
+
+
+def infer_market_type(code: str, name: Optional[str] = None) -> AStockMarketType:
+    """Infer market segment from 6-digit code (and optional Chinese name).
+
+    Name takes precedence so ST/*ST stocks are flagged regardless of code.
+    Code prefix rules:
+      688 → STAR (科创板)
+      300 / 301 → ChiNext (创业板)
+      8 / 4 → Beijing (北交所)
+      6 / 9 → Main-SH (沪市主板 / B 股)
+      0 / 2 / 3 (otherwise) → Main-SZ (深市主板)
+    """
+    if name and ("ST" in name.upper() or "*ST" in name.upper()):
+        return AStockMarketType.ST
+    code = (code or "").strip()
+    if code.startswith("688"):
+        return AStockMarketType.STAR
+    if code.startswith(("300", "301")):
+        return AStockMarketType.CHINEXT
+    if code.startswith(("8", "4")):
+        return AStockMarketType.BEIJING
+    if code.startswith(("6", "9")):
+        return AStockMarketType.MAIN_SH
+    return AStockMarketType.MAIN_SZ
+
+
+_DAILY_LIMIT_PCT = {
+    AStockMarketType.MAIN_SH: 10.0,
+    AStockMarketType.MAIN_SZ: 10.0,
+    AStockMarketType.STAR: 20.0,
+    AStockMarketType.CHINEXT: 20.0,
+    AStockMarketType.BEIJING: 30.0,
+    AStockMarketType.ST: 5.0,
+}
+
+
+_MIN_LOT = {
+    AStockMarketType.MAIN_SH: 100,
+    AStockMarketType.MAIN_SZ: 100,
+    AStockMarketType.STAR: 200,
+    AStockMarketType.CHINEXT: 200,
+    AStockMarketType.BEIJING: 100,
+    AStockMarketType.ST: 100,
+}
+
+
+def astock_daily_limit_pct(market_type: AStockMarketType) -> float:
+    """Daily price limit (% from previous close) for the given segment."""
+    return _DAILY_LIMIT_PCT[market_type]
+
+
+def astock_min_lot(market_type: AStockMarketType) -> int:
+    """Minimum tradable share count for a single order."""
+    return _MIN_LOT[market_type]
+
+
+def astock_constraint_summary(market_type: AStockMarketType) -> str:
+    """One-line summary for embedding in the Trader's prompt."""
+    return (
+        f"市场类别: {market_type.value} | "
+        f"涨跌停: ±{astock_daily_limit_pct(market_type):.0f}% | "
+        f"最小手数: {astock_min_lot(market_type)} 股 | "
+        "结算: T+1（当日买入次日方可卖出）"
+    )
+
+
+def _parse_shares_from_text(text: str) -> Optional[int]:
+    """Best-effort extraction of an absolute share count from free-text sizing.
+
+    Recognises "1000 shares", "买入 500 股", "建仓 300股". Returns None when
+    the sizing is expressed only as a percentage / capital amount / qualitative
+    description — in that case lot-size enforcement happens later at execution.
+
+    Note: ``\b`` is not a word boundary after the Chinese character ``股``,
+    so we use a non-word-character lookahead / end-of-string instead.
+    """
+    if not text:
+        return None
+    m = re.search(
+        r"(\d[\d,]*)\s*(?:shares?\b|股)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not m:
+        return None
+    try:
+        return int(m.group(1).replace(",", ""))
+    except ValueError:
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -113,6 +220,18 @@ class TraderProposal(BaseModel):
     reports, then turns them into a concrete transaction: what action to
     take, the reasoning that justifies it, and the practical levels for
     entry, stop-loss, and sizing.
+
+    A-share constraint guard rails (when ``astock_constraints`` is supplied
+    by the orchestration layer):
+      - Entry/stop prices must be positive
+      - Stop-loss must sit on the correct side of entry given the action
+        (BUY: stop < entry; SELL: stop > entry)
+      - If ``position_sizing`` mentions an absolute share count, it must be
+        a multiple of the segment's minimum lot (100 main board / 200 STAR &
+        ChiNext); the validator rejects non-conforming proposals so the
+        trader is forced to re-issue a compliant order.
+      - T+1 settlement is enforced at the prompt level — the LLM is told
+        same-day buy + sell is impossible.
     """
 
     action: TraderAction = Field(
@@ -136,6 +255,50 @@ class TraderProposal(BaseModel):
         default=None,
         description="Optional sizing guidance, e.g. '5% of portfolio'.",
     )
+    astock_market_type: Optional[AStockMarketType] = Field(
+        default=None,
+        description=(
+            "A-share market segment that drives daily price limit and minimum "
+            "lot size. Populated by the trader node from the ticker; the LLM "
+            "should pass this through unchanged."
+        ),
+    )
+
+    @field_validator("entry_price", "stop_loss")
+    @classmethod
+    def _prices_positive(cls, v: Optional[float]) -> Optional[float]:
+        if v is not None and v <= 0:
+            raise ValueError("price levels must be positive when supplied")
+        return v
+
+    @model_validator(mode="after")
+    def _validate_astock_constraints(self) -> "TraderProposal":
+        # Stop loss direction must be consistent with the action.
+        if self.entry_price is not None and self.stop_loss is not None:
+            if self.action == TraderAction.BUY and self.stop_loss >= self.entry_price:
+                raise ValueError(
+                    "Buy proposal: stop_loss must be below entry_price"
+                )
+            if self.action == TraderAction.SELL and self.stop_loss <= self.entry_price:
+                raise ValueError(
+                    "Sell proposal: stop_loss must be above entry_price"
+                )
+
+        # Minimum lot size: only enforced when the LLM expressed sizing as a
+        # concrete share count *and* a market segment was supplied. Sizing
+        # given as "5% of portfolio" or "moderate exposure" passes through;
+        # final lot rounding happens at execution.
+        if self.astock_market_type and self.position_sizing:
+            shares = _parse_shares_from_text(self.position_sizing)
+            if shares is not None:
+                min_lot = astock_min_lot(self.astock_market_type)
+                if shares <= 0 or shares % min_lot != 0:
+                    raise ValueError(
+                        f"position_sizing share count must be a positive "
+                        f"multiple of {min_lot} for {self.astock_market_type.value} "
+                        f"(got {shares})"
+                    )
+        return self
 
 
 def render_trader_proposal(proposal: TraderProposal) -> str:
@@ -150,6 +313,8 @@ def render_trader_proposal(proposal: TraderProposal) -> str:
         "",
         f"**Reasoning**: {proposal.reasoning}",
     ]
+    if proposal.astock_market_type is not None:
+        parts.extend(["", f"**A股市场类别**: {astock_constraint_summary(proposal.astock_market_type)}"])
     if proposal.entry_price is not None:
         parts.extend(["", f"**Entry Price**: {proposal.entry_price}"])
     if proposal.stop_loss is not None:
