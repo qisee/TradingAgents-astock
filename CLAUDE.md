@@ -13,11 +13,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## 常用命令
 
 ```bash
-# 安装（开发模式）
+# 安装（开发模式）— 整个 pip 解析可能爬树太深 (resolution-too-deep)，
+# 因为 langchain-google-genai 要 httpx>=0.28 而 mootdx 锁死 httpx==0.25。
+# 推荐两步：
+pip install mootdx --no-deps
 pip install -e .
 
-# 如果遇到 mootdx httpx 锁版本冲突
-pip install mootdx --no-deps
+# mootdx --no-deps 会漏掉它的运行时依赖。如果跑分析时看到大量
+# "mootdx K-line failed: No module named 'tdxpy'" 警告并 fallback 到
+# Sina HTTP（功能不挂但慢 2-3 倍），补装：
+pip install tdxpy prettytable py-mini-racer
 
 # 跑全部测试
 python -m pytest tests/ -v
@@ -113,7 +118,9 @@ Portfolio Manager（deep_think_llm 终判 → Buy/Hold/Sell + 仓位）
 ## 已知问题与注意事项
 
 ### 依赖冲突
-mootdx 锁死 `httpx==0.25.2`，与 langchain-google-genai 的 `httpx>=0.28.1` 冲突。不用 Google 模型时可 `pip install mootdx --no-deps` 绕过。
+mootdx 锁死 `httpx==0.25.2`，与 langchain-google-genai 的 `httpx>=0.28.1` 冲突；同时 langchain 全家桶 + mootdx 的依赖图深到 pip 解析爆栈 (resolution-too-deep)。绕过：先 `pip install mootdx --no-deps`，再 `pip install -e .`。
+
+mootdx --no-deps 会漏掉它的运行时依赖 `tdxpy / prettytable / py-mini-racer`，跑分析时会持续打 `mootdx K-line failed: No module named 'tdxpy'`，自动 fallback 到 Sina HTTP（功能 OK，但每次请求多走一次失败重试）。补 `pip install tdxpy prettytable py-mini-racer` 即可。
 
 ### akshare 已移除（v0.2.5）
 v0.2.5 起完全移除 akshare 依赖，所有数据通过直连 HTTP API 获取。彻底消除了 akshare + pandas 3.0 + pyarrow 的 `ArrowInvalid` 崩溃问题，也消除了 akshare 与 mootdx 的 httpx 版本冲突。

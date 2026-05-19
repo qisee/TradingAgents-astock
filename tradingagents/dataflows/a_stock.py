@@ -243,7 +243,14 @@ def _ths_eps_forecast(code: str) -> pd.DataFrame:
     """Fetch consensus EPS forecast from 同花顺 (direct HTTP).
 
     Returns DataFrame with columns roughly: 年度, 预测机构数, 最小值, 均值, 最大值.
+
+    Note: ``pd.read_html`` since pandas 2.x rejects bare HTML strings (it
+    tries to ``open()`` them as filesystem paths and raises ``[Errno 2]
+    No such file or directory: <!DOCTYPE HTML>...``). Wrap the response
+    text in ``StringIO`` so it's read as an in-memory stream.
     """
+    from io import StringIO
+
     url = f"https://basic.10jqka.com.cn/new/{code}/worth.html"
     headers = {
         "User-Agent": _UA,
@@ -251,8 +258,16 @@ def _ths_eps_forecast(code: str) -> pd.DataFrame:
     }
     r = _requests.get(url, headers=headers, timeout=15)
     r.encoding = "gbk"
-    dfs = pd.read_html(r.text)
-    # Find the table containing EPS data
+    try:
+        dfs = pd.read_html(StringIO(r.text))
+    except Exception as e:
+        # pandas raises ValueError when no tables are found AND/OR ImportError
+        # when it falls back to html5lib (not always installed). Either way
+        # this is a best-effort scraper — return an empty DataFrame so the
+        # caller can treat it as "no consensus data available".
+        logger.debug("THS EPS forecast page yielded no tables: %s", e)
+        return pd.DataFrame()
+    # Prefer the EPS forecast summary table (has 每股收益 / 均值 in columns).
     for df in dfs:
         cols = [str(c) for c in df.columns]
         if any("每股收益" in c or "均值" in c for c in cols):
@@ -1243,6 +1258,37 @@ def _is_policy_news(title: str, body: str) -> bool:
     return any(token in text for token in _POLICY_INSTITUTIONS)
 
 
+def _parse_pub_dt(value) -> datetime | None:
+    """Parse a publication timestamp from CLS / Eastmoney into a naive datetime.
+
+    Accepts unix seconds (int or numeric string) or common Chinese-portal
+    date formats (``YYYY-MM-DD HH:MM:SS``, ``YYYY-MM-DD HH:MM``, ``YYYY-MM-DD``).
+    Returns None on any failure — the caller should treat that as
+    "unknown, do not filter out" so a missing timestamp does not silently
+    drop otherwise-valid news.
+    """
+    if value is None or value == "":
+        return None
+    # Unix timestamp (int or numeric string)
+    if isinstance(value, (int, float)):
+        try:
+            return datetime.fromtimestamp(int(value))
+        except (ValueError, OSError, OverflowError):
+            return None
+    s = str(value).strip()
+    if s.isdigit() and len(s) >= 9:
+        try:
+            return datetime.fromtimestamp(int(s))
+        except (ValueError, OSError, OverflowError):
+            return None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d", "%Y/%m/%d %H:%M:%S"):
+        try:
+            return datetime.strptime(s, fmt)
+        except ValueError:
+            continue
+    return None
+
+
 def get_policy_news(
     curr_date: Annotated[str, "Current date yyyy-mm-dd"],
     look_back_days: Annotated[int, "Days to look back; 0 → config default"] = 0,
@@ -1256,8 +1302,13 @@ def get_policy_news(
 
     Items are filtered by ``_POLICY_INSTITUTIONS`` (国务院 / 证监会 / 央行 /
     发改委 / 工信部 / 国资委 / 商务部 / 财政部 / 外管局 / 网信办 / 国家金融
-    监管总局 ...). When neither source returns matches, callers should fall
-    back to ``get_global_news`` for broader macro context.
+    监管总局 ...) AND by publication date — only items whose timestamp falls
+    inside ``[curr_date - look_back_days, curr_date]`` are returned. Items
+    with an unparseable timestamp are kept (treated as "unknown date") so
+    keyword-relevant news isn't silently dropped.
+
+    When neither source returns matches, callers should fall back to
+    ``get_global_news`` for broader macro context.
     """
     from .config import get_config
 
@@ -1267,8 +1318,15 @@ def get_policy_news(
     if limit is None or limit <= 0:
         limit = int(cfg.get("global_news_article_limit", 10) or 10)
 
+    end_dt = datetime.strptime(curr_date, "%Y-%m-%d") + relativedelta(days=1)  # inclusive end
     start_dt = datetime.strptime(curr_date, "%Y-%m-%d") - relativedelta(days=look_back_days)
     start_date = start_dt.strftime("%Y-%m-%d")
+
+    def _in_window(pub_dt: datetime | None) -> bool:
+        # Unknown timestamp → keep (don't drop news whose date we couldn't parse).
+        if pub_dt is None:
+            return True
+        return start_dt <= pub_dt < end_dt
 
     all_news: list[dict] = []
 
@@ -1280,24 +1338,23 @@ def get_policy_news(
         cls_params = {"rn": str(raw_quota), "page": "1"}
         cls_headers = {"User-Agent": _UA, "Referer": "https://www.cls.cn/"}
         r_cls = _requests.get(cls_url, params=cls_params, headers=cls_headers, timeout=10)
-        d_cls = r_cls.json()
-        for item in d_cls.get("data", {}).get("roll_data", []):
+        d_cls = r_cls.json() or {}
+        cls_data = d_cls.get("data") or {}
+        for item in cls_data.get("roll_data") or []:
             title = item.get("title", "") or item.get("brief", "")
             content = item.get("content", "") or item.get("brief", "")
-            ctime = item.get("ctime", "")
-            pub_time = ""
-            if ctime:
-                try:
-                    pub_time = datetime.fromtimestamp(int(ctime)).strftime("%Y-%m-%d %H:%M")
-                except (ValueError, TypeError, OSError):
-                    pub_time = str(ctime)
-            if _is_policy_news(title, content):
-                all_news.append({
-                    "title": title,
-                    "content": content,
-                    "time": pub_time,
-                    "source": "CLS Wire (policy)",
-                })
+            pub_dt = _parse_pub_dt(item.get("ctime"))
+            pub_time = pub_dt.strftime("%Y-%m-%d %H:%M") if pub_dt else ""
+            if not _is_policy_news(title, content):
+                continue
+            if not _in_window(pub_dt):
+                continue
+            all_news.append({
+                "title": title,
+                "content": content,
+                "time": pub_time,
+                "source": "CLS Wire (policy)",
+            })
     except Exception as e:
         logger.warning("CLS policy fetch failed: %s", e)
 
@@ -1313,18 +1370,23 @@ def get_policy_news(
         }
         em_headers = {"User-Agent": _UA, "Referer": "https://kuaixun.eastmoney.com/"}
         r_em = _requests.get(em_url, params=em_params, headers=em_headers, timeout=10)
-        d_em = r_em.json()
-        for item in d_em.get("data", {}).get("fastNewsList", []):
+        d_em = r_em.json() or {}
+        em_data = d_em.get("data") or {}
+        for item in em_data.get("fastNewsList") or []:
             title = item.get("title", "")
-            summary = item.get("summary", "")[:400]
-            pub_time = item.get("showTime", "")
-            if _is_policy_news(title, summary):
-                all_news.append({
-                    "title": title,
-                    "content": summary,
-                    "time": pub_time,
-                    "source": "Eastmoney 7x24 (policy)",
-                })
+            summary = (item.get("summary", "") or "")[:400]
+            pub_dt = _parse_pub_dt(item.get("showTime"))
+            pub_time = pub_dt.strftime("%Y-%m-%d %H:%M") if pub_dt else item.get("showTime", "")
+            if not _is_policy_news(title, summary):
+                continue
+            if not _in_window(pub_dt):
+                continue
+            all_news.append({
+                "title": title,
+                "content": summary,
+                "time": pub_time,
+                "source": "Eastmoney 7x24 (policy)",
+            })
     except Exception as e:
         logger.warning("Eastmoney policy fetch failed: %s", e)
 
