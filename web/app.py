@@ -199,9 +199,19 @@ def _detect_llm_settings() -> dict:
     if os.environ.get("TRADINGAGENTS_LLM_PROVIDER"):
         return {}  # already applied by _apply_env_overrides in default_config.py
 
+    if os.environ.get("MOONSHOT_API_KEY"):
+        # Moonshot Platform (OpenAI-compatible). First choice for Kimi
+        # users — token-metered, no client-whitelist restriction.
+        return {
+            "llm_provider": "moonshot",
+            "deep_think_llm": os.environ.get("TRADINGAGENTS_DEEP_THINK_LLM", "kimi-k2.6"),
+            "quick_think_llm": os.environ.get("TRADINGAGENTS_QUICK_THINK_LLM", "kimi-k2.6"),
+        }
     if os.environ.get("ANTHROPIC_AUTH_TOKEN"):
-        # Kimi Coding Plan default. Users on Moonshot Platform should
-        # override the two env vars below in .env.
+        # Kimi For Coding (Anthropic-compatible). Server-side enforces a
+        # Coding-Agent whitelist (Kimi CLI / Claude Code / Roo Code /
+        # Kilo Code …) — anthropic-python SDK currently passes that
+        # check, but it's a grey area.
         return {
             "llm_provider": "anthropic",
             "deep_think_llm": os.environ.get("TRADINGAGENTS_DEEP_THINK_LLM", "claude-sonnet-4-6"),

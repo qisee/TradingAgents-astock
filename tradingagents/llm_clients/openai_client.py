@@ -118,6 +118,11 @@ _PROVIDER_CONFIG = {
     "openrouter": ("https://openrouter.ai/api/v1", "OPENROUTER_API_KEY"),
     "ollama": ("http://localhost:11434/v1", None),
     "minimax": ("https://api.minimax.chat/v1", "MINIMAX_API_KEY"),
+    # Moonshot Platform (platform.moonshot.cn) — Kimi-K2 family via the
+    # OpenAI-compatible Chat Completions endpoint. Distinct from Kimi
+    # For Coding (api.kimi.com/coding/) which only serves whitelisted
+    # Coding Agents and is wired through the Anthropic-protocol path.
+    "moonshot": ("https://api.moonshot.cn/v1", "MOONSHOT_API_KEY"),
 }
 
 

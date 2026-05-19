@@ -1,4 +1,12 @@
-"""End-to-end test: run TradingAgents pipeline on A-stock 688017 via Kimi 2.6."""
+"""End-to-end test: run TradingAgents pipeline on A-stock 688017 via Moonshot Platform (kimi-k2.6).
+
+Why Moonshot Platform and not Kimi For Coding:
+- ``api.kimi.com/coding/`` only accepts whitelisted Coding-Agent clients
+  (Kimi CLI / Claude Code / Roo Code / Kilo Code …). Generic third-party
+  integrations get HTTP 403 ``access_terminated_error``.
+- ``api.moonshot.cn/v1`` is the OpenAI-compatible Chat Completions
+  endpoint; works with any OpenAI SDK, token-metered (sk-xxx key).
+"""
 
 from tradingagents.graph.trading_graph import TradingAgentsGraph
 from tradingagents.default_config import DEFAULT_CONFIG
@@ -9,11 +17,12 @@ load_dotenv()
 
 config = DEFAULT_CONFIG.copy()
 
-# --- LLM: Kimi 2.6 via Anthropic-compatible API ---
-config["llm_provider"] = "anthropic"
-config["deep_think_llm"] = "claude-sonnet-4-6"   # Kimi maps internally
-config["quick_think_llm"] = "claude-sonnet-4-6"
-config["backend_url"] = "https://api.kimi.com/coding/"
+# --- LLM: kimi-k2.6 via Moonshot Platform (OpenAI-compatible) ---
+config["llm_provider"] = "moonshot"
+config["deep_think_llm"] = "kimi-k2.6"
+config["quick_think_llm"] = "kimi-k2.6"
+# backend_url not set → openai_client picks Moonshot default
+# (https://api.moonshot.cn/v1). API key from MOONSHOT_API_KEY in .env.
 
 # --- Data: A-stock vendor (mootdx + tencent + eastmoney + sina) ---
 config["data_vendors"] = {
@@ -32,7 +41,7 @@ print("=" * 60)
 print("TradingAgents-Astock E2E Test")
 print("Ticker: 688017")
 print("Trade date: 2026-04-30")
-print("LLM: Kimi 2.6 via Anthropic API")
+print("LLM: kimi-k2.6 via Moonshot Platform (OpenAI-compatible)")
 print("Data: a_stock (mootdx + tencent + eastmoney + sina)")
 print("=" * 60)
 
