@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 from datetime import datetime
 from pathlib import Path
@@ -10,16 +11,44 @@ from typing import Any
 from fpdf import FPDF
 
 
+def _windows_font_candidates() -> list[str]:
+    """Common CJK font paths under %WINDIR%\\Fonts on Windows 7..11."""
+    fonts_dir = Path(os.environ.get("WINDIR", r"C:\Windows")) / "Fonts"
+    return [
+        str(fonts_dir / "msyh.ttc"),       # 微软雅黑 (default, Win 7+)
+        str(fonts_dir / "msyh.ttf"),       # older naming
+        str(fonts_dir / "msyhbd.ttc"),
+        str(fonts_dir / "simhei.ttf"),     # 黑体
+        str(fonts_dir / "simsun.ttc"),     # 宋体
+        str(fonts_dir / "simsun.ttf"),
+        str(fonts_dir / "STSONG.TTF"),     # 华文宋体
+        str(fonts_dir / "STHeiti.ttf"),
+    ]
+
+
+# Order: macOS → Windows → Linux. The first existing path on the host
+# wins. Override via TRADINGAGENTS_CJK_FONT env var when running in
+# stripped-down containers without any of these.
 _FONT_CANDIDATES = [
+    # macOS
     "/System/Library/Fonts/PingFang.ttc",
     "/System/Library/Fonts/STHeiti Light.ttc",
+    # Windows (added in this fork — original list was Unix-only and broke
+    # PDF export on every Windows host with "Character 股 ... outside the
+    # range of characters supported by the font used: Helvetica").
+    *_windows_font_candidates(),
+    # Linux distros
     "/usr/share/fonts/truetype/noto/NotoSansSC-Regular.ttf",
     "/usr/share/fonts/noto-cjk/NotoSansCJKsc-Regular.otf",
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
 ]
 
 
 def _find_cjk_font() -> str | None:
+    override = os.environ.get("TRADINGAGENTS_CJK_FONT")
+    if override and Path(override).exists():
+        return override
     for path in _FONT_CANDIDATES:
         if Path(path).exists():
             return path

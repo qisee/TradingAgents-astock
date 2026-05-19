@@ -40,12 +40,60 @@ st.markdown(
     <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;900&display=swap');
 
-    /* Hide Streamlit chrome for clean video recording */
-    #MainMenu, header[data-testid="stHeader"],
-    footer, div[data-testid="stDecoration"],
+    /* Hide Streamlit chrome (menu / footer / decoration / toolbar) */
+    #MainMenu, footer,
+    div[data-testid="stDecoration"],
     div[data-testid="stToolbar"] { display: none !important; }
-    /* Ensure sidebar collapse/expand control is always visible */
-    button[data-testid="collapsedControl"] { display: flex !important; }
+
+    /* Header transparent but kept in DOM so any toggle inside remains
+       clickable on Streamlit versions where it lives there. */
+    header[data-testid="stHeader"] {
+        background: transparent !important;
+        height: auto !important;
+    }
+
+    /* FORCE sidebar to always be expanded and visible — across every
+       Streamlit version 1.29..1.57+, the collapse-expand toggle keeps
+       getting renamed/moved (collapsedControl → stSidebarCollapsedControl
+       → stSidebarHeader → …), so instead of chasing the testid we
+       short-circuit the collapsed state entirely: override the
+       transform/margin/width Streamlit uses to slide it off-screen,
+       and hide the close button inside the sidebar so the user can't
+       collapse it. The sidebar is the only entry point on this page,
+       hiding it accidentally is always a bug, never a feature. */
+    section[data-testid="stSidebar"] {
+        transform: none !important;
+        margin-left: 0 !important;
+        visibility: visible !important;
+        display: flex !important;
+        min-width: 244px !important;
+        width: 244px !important;
+        max-width: 244px !important;
+    }
+    section[data-testid="stSidebar"] > div:first-child {
+        transform: none !important;
+        margin-left: 0 !important;
+        width: 244px !important;
+    }
+    /* Hide the close (collapse) button inside the sidebar across versions */
+    section[data-testid="stSidebar"] button[kind="header"],
+    section[data-testid="stSidebar"] button[kind="headerNoPadding"],
+    section[data-testid="stSidebar"] button[data-testid*="ollaps"],
+    section[data-testid="stSidebar"] button[data-testid*="lose"],
+    section[data-testid="stSidebar"] button[aria-label*="lose" i],
+    section[data-testid="stSidebar"] button[aria-label*="ollapse" i] {
+        display: none !important;
+    }
+    /* And the floating "expand" button (when somehow shown collapsed) —
+       force it visible in case CSS above didn't catch this version. */
+    button[data-testid="collapsedControl"],
+    button[data-testid="stSidebarCollapsedControl"],
+    button[data-testid*="SidebarCollapseButton"] {
+        display: flex !important;
+        visibility: visible !important;
+        opacity: 1 !important;
+        z-index: 9999 !important;
+    }
 
     html, body, [class*="css"] {
         font-family: 'Inter', -apple-system, sans-serif;
@@ -131,11 +179,80 @@ st.markdown(
 
 # ── Build config ─────────────────────────────────────────────────────────────
 
+def _detect_llm_settings() -> dict:
+    """Pick provider + models based on which key is set in .env.
+
+    Priority (highest first):
+      1. TRADINGAGENTS_LLM_PROVIDER explicitly set → trust the env override
+         (DEFAULT_CONFIG already absorbed it via _apply_env_overrides)
+      2. ANTHROPIC_AUTH_TOKEN → Kimi (Anthropic-compat Bearer protocol)
+      3. MINIMAX_API_KEY      → MiniMax
+      4. DEEPSEEK_API_KEY     → DeepSeek
+      5. ANTHROPIC_API_KEY    → Anthropic (X-Api-Key)
+      6. ZHIPU_API_KEY        → 智谱 GLM
+      7. DASHSCOPE_API_KEY    → 通义千问 (Qwen)
+      8. OPENAI_API_KEY       → OpenAI
+      9. fall through to DEFAULT_CONFIG's defaults
+    """
+    import os
+
+    if os.environ.get("TRADINGAGENTS_LLM_PROVIDER"):
+        return {}  # already applied by _apply_env_overrides in default_config.py
+
+    if os.environ.get("ANTHROPIC_AUTH_TOKEN"):
+        # Kimi Coding Plan default. Users on Moonshot Platform should
+        # override the two env vars below in .env.
+        return {
+            "llm_provider": "anthropic",
+            "deep_think_llm": os.environ.get("TRADINGAGENTS_DEEP_THINK_LLM", "claude-sonnet-4-6"),
+            "quick_think_llm": os.environ.get("TRADINGAGENTS_QUICK_THINK_LLM", "claude-sonnet-4-6"),
+            "backend_url": os.environ.get("TRADINGAGENTS_LLM_BACKEND_URL", "https://api.kimi.com/coding/"),
+        }
+    if os.environ.get("MINIMAX_API_KEY"):
+        return {
+            "llm_provider": "minimax",
+            "deep_think_llm": "MiniMax-M2.7",
+            "quick_think_llm": "MiniMax-M2.7-highspeed",
+        }
+    if os.environ.get("DEEPSEEK_API_KEY"):
+        return {
+            "llm_provider": "deepseek",
+            "deep_think_llm": "deepseek-chat",
+            "quick_think_llm": "deepseek-chat",
+        }
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        return {
+            "llm_provider": "anthropic",
+            "deep_think_llm": "claude-sonnet-4-6",
+            "quick_think_llm": "claude-sonnet-4-6",
+        }
+    if os.environ.get("ZHIPU_API_KEY"):
+        return {
+            "llm_provider": "glm",
+            "deep_think_llm": "glm-4-plus",
+            "quick_think_llm": "glm-4-air",
+        }
+    if os.environ.get("DASHSCOPE_API_KEY"):
+        return {
+            "llm_provider": "qwen",
+            "deep_think_llm": "qwen-max",
+            "quick_think_llm": "qwen-turbo",
+        }
+    if os.environ.get("OPENAI_API_KEY"):
+        return {
+            "llm_provider": "openai",
+            "deep_think_llm": "gpt-5.4",
+            "quick_think_llm": "gpt-5.4-mini",
+        }
+    return {}
+
+
 def _build_config() -> dict:
     config = DEFAULT_CONFIG.copy()
-    config["llm_provider"] = "minimax"
-    config["deep_think_llm"] = "MiniMax-M2.7"
-    config["quick_think_llm"] = "MiniMax-M2.7-highspeed"
+    # Auto-detect LLM provider from env vars; only overrides keys that
+    # the detection actually filled in, so any explicit TRADINGAGENTS_*
+    # env override that already landed in DEFAULT_CONFIG is preserved.
+    config.update(_detect_llm_settings())
     config["data_vendors"] = {
         "core_stock_apis": "a_stock",
         "technical_indicators": "a_stock",
